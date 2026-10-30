@@ -16,25 +16,23 @@ DEV_PASSWORD = "1903145"
 logging.basicConfig(level=logging.INFO)
 router = Router()
 
-# --- БАЗЫ ДАННЫХ (в памяти) ---
-balances = {}       # user_id: шоколадки
-warns = {}          # user_id: варны
-inventory = {}      # user_id: инвентарь
-custom_nicks = {}   # user_id: кастомный ник
-premium_users = set() # ID тех, у кого есть премиум
+# --- БАЗЫ ДАННЫХ ---
+balances = {}
+warns = {}
+custom_nicks = {}
+marriages = {}      # user_id: partner_id
+clans = {}          # clan_name: {"leader": id, "members": []}
+user_clan = {}      # user_id: clan_name
+boss_hp = 10000
+boss_reward = 5000
 last_work = {}
 last_daily = {}
 awaiting_password = set()
-
-SHOP_ITEMS = {
-    "вип": {"name": "👑 VIP-статус", "price": 500},
-    "размут": {"name": "🔓 Размут", "price": 1000},
-    "шоколадка": {"name": "🍫 Шоколадка", "price": 50},
-}
+has_premium = set()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def get_balance(uid): return balances.get(uid, 0)
-def add_balance(uid, amount): balances[uid] = get_balance(uid) + amount
+def add_balance(uid, amount): balances[uid] = max(0, get_balance(uid) + amount)
 def get_name(uid, default_name): return custom_nicks.get(uid, default_name)
 
 async def is_admin(msg: Message):
@@ -43,31 +41,146 @@ async def is_admin(msg: Message):
         return member.status in ["administrator", "creator"]
     except: return False
 
-# Универсальная проверка: начинается ли текст с команды (игнорируя регистр, ! или /)
 def is_cmd(text, cmd):
     t = text.lower()
     return t.startswith(f"!{cmd}") or t.startswith(f"/{cmd}")
 
-# --- ПРИВЕТСТВИЕ НОВЫХ УЧАСТНИКОВ ---
-@router.message(F.new_chat_members)
-async def welcome_new_member(msg: Message):
-    for member in msg.new_chat_members:
-        if member.is_bot: continue
-        await msg.reply(f"👋 Привет, {member.first_name}!\nНе забудь заработать свои первые 🍫 командой `!работа`.")
-
-# --- СТАРТ (ТВОЙ ТЕКСТ) ---
+# --- СТАРТ ---
 @router.message(F.text.lower().in_({"/start", "!start", "!помощь", "!help", "/help"}))
 async def start_cmd(msg: Message):
-    text = (
+    await msg.reply(
         f"Привет {msg.from_user.first_name} 🍫\n"
         "Я твой помощник, но команды узнай в меню лень болтать 🙊"
     )
+
+# --- БРАКИ ---
+@router.message(F.text.lower().startswith("!брак") | F.text.lower().startswith("/marry"))
+async def marriage_cmd(msg: Message):
+    if not msg.reply_to_message: return await msg.reply("Ответь на сообщение того, с кем хочешь вступить в брак.")
+    target_id = msg.reply_to_message.from_user.id
+    if target_id == msg.from_user.id: return await msg.reply("Нельзя жениться на себе.")
+    if msg.from_user.id in marriages: return await msg.reply("Ты уже в браке. Сначала !развод.")
+    
+    marriages[msg.from_user.id] = target_id
+    marriages[target_id] = msg.from_user.id
+    await msg.reply(f"💍 Поздравляем! {msg.from_user.mention} и {msg.reply_to_message.from_user.mention} теперь в браке!")
+
+@router.message(F.text.lower() == "!развод" or F.text.lower() == "/divorce")
+async def divorce_cmd(msg: Message):
+    if msg.from_user.id not in marriages: return await msg.reply("Ты не в браке.")
+    partner = marriages[msg.from_user.id]
+    del marriages[msg.from_user.id]
+    if partner in marriages: del marriages[partner]
+    await msg.reply("💔 Брак расторгнут.")
+
+# --- КЛАНЫ ---
+@router.message(F.text.lower().startswith("!клан создать") | F.text.lower().startswith("/clan create"))
+async def create_clan_cmd(msg: Message):
+    try: clan_name = msg.text.split(maxsplit=2)[2]
+    except: return await msg.reply("Напиши: !клан создать [Название]")
+    if msg.from_user.id in user_clan: return await msg.reply("Ты уже в клане.")
+    if clan_name in clans: return await msg.reply("Такой клан уже есть.")
+    
+    clans[clan_name] = {"leader": msg.from_user.id, "members": [msg.from_user.id]}
+    user_clan[msg.from_user.id] = clan_name
+    await msg.reply(f"🏰 Клан **{clan_name}** создан! Лидер: {msg.from_user.mention}")
+
+@router.message(F.text.lower().startswith("!клан вступить") | F.text.lower().startswith("/clan join"))
+async def join_clan_cmd(msg: Message):
+    try: clan_name = msg.text.split(maxsplit=2)[2]
+    except: return await msg.reply("Напиши: !клан вступить [Название]")
+    if msg.from_user.id in user_clan: return await msg.reply("Ты уже в клане.")
+    if clan_name not in clans: return await msg.reply("Клана не существует.")
+    
+    clans[clan_name]["members"].append(msg.from_user.id)
+    user_clan[msg.from_user.id] = clan_name
+    await msg.reply(f"✅ Ты вступил в клан **{clan_name}**!")
+
+@router.message(F.text.lower() == "!клан топ" or F.text.lower() == "/clan top")
+async def top_clans_cmd(msg: Message):
+    if not clans: return await msg.reply("Кланов пока нет.")
+    sorted_clans = sorted(clans.items(), key=lambda x: len(x[1]["members"]), reverse=True)[:5]
+    text = "🏰 **Топ кланов:**\n"
+    for i, (name, data) in enumerate(sorted_clans, 1):
+        text += f"{i}. {name} — {len(data['members'])} чел.\n"
     await msg.reply(text)
+
+# --- БОСС ---
+@router.message(F.text.lower() == "!босс" or F.text.lower() == "/boss")
+async def boss_cmd(msg: Message):
+    global boss_hp
+    if boss_hp <= 0: return await msg.reply("Босс уже мертв. Скоро появится новый!")
+    
+    dmg = random.randint(50, 300)
+    boss_hp -= dmg
+    
+    if boss_hp <= 0:
+        add_balance(msg.from_user.id, boss_reward)
+        await msg.reply(f"💀 **БОСС ПОВЕРЖЕН!** {msg.from_user.mention} забрал {boss_reward} 🍫!")
+        boss_hp = 10000
+    else:
+        await msg.reply(f"⚔️ Ты ударил босса на {dmg} урона! Осталось HP: {boss_hp}")
+
+# --- КЕЙСЫ ---
+@router.message(F.text.lower() == "!кейс" or F.text.lower() == "/case")
+async def case_cmd(msg: Message):
+    cost = 100
+    if get_balance(msg.from_user.id) < cost: return await msg.reply(f"Кейс стоит {cost} 🍫. Мало шоколадок.")
+    
+    add_balance(msg.from_user.id, -cost)
+    prizes = [(10, "🥉 Маленький", 50), (30, "🥈 Средний", 150), (50, "🥇 Большой", 300), (9, "💎 Мега", 1000), (1, "👑 ДЖЕКПОТ", 5000)]
+    total_weight = sum(p[0] for p in prizes)
+    r = random.randint(1, total_weight)
+    current = 0
+    for weight, name, reward in prizes:
+        current += weight
+        if r <= current:
+            add_balance(msg.from_user.id, reward)
+            await msg.reply(f"🎁 Ты открыл кейс и получил: **{name}** (+{reward} 🍫)!")
+            break
+
+# --- БИТВА ---
+@router.message(F.text.lower().startswith("!битва") | F.text.lower().startswith("/battle"))
+async def battle_cmd(msg: Message):
+    if not msg.reply_to_message: return await msg.reply("Ответь на сообщение противника: !битва")
+    if msg.reply_to_message.from_user.id == msg.from_user.id: return await msg.reply("Сам с собой?")
+    
+    my_power = get_balance(msg.from_user.id) // 10 + random.randint(1, 50)
+    enemy_power = get_balance(msg.reply_to_message.from_user.id) // 10 + random.randint(1, 50)
+    
+    if my_power > enemy_power:
+        win_amount = random.randint(10, 100)
+        add_balance(msg.reply_to_message.from_user.id, -win_amount)
+        add_balance(msg.from_user.id, win_amount)
+        await msg.reply(f"⚔️ {msg.from_user.mention} победил {msg.reply_to_message.from_user.mention} и забрал {win_amount} 🍫!")
+    else:
+        win_amount = random.randint(10, 100)
+        add_balance(msg.from_user.id, -win_amount)
+        add_balance(msg.reply_to_message.from_user.id, win_amount)
+        await msg.reply(f"⚔️ {msg.reply_to_message.from_user.mention} победил {msg.from_user.mention} и забрал {win_amount} 🍫!")
+
+# --- ПРОФИЛЬ ---
+@router.message(F.text.lower() == "!профиль" or F.text.lower() == "/profile")
+async def profile_cmd(msg: Message):
+    uid = msg.from_user.id
+    name = get_name(uid, msg.from_user.first_name)
+    status = "👑 Premium" if uid in has_premium else "👤 Юзер"
+    partner = marriages.get(uid)
+    partner_name = get_name(partner, "Никто") if partner else "Никто"
+    clan_name = user_clan.get(uid, "Нет")
+    
+    await msg.reply(
+        f"👤 **{name}** [{status}]\n"
+        f"🍫 Шоколадки: {get_balance(uid)}\n"
+        f"💍 Брак: {partner_name}\n"
+        f"🏰 Клан: {clan_name}\n"
+        f"⚠️ Варны: {warns.get(uid, 0)}/3"
+    )
 
 # --- ПАНЕЛЬ РАЗРАБОТЧИКА ---
 @router.message(F.text.lower() == "!разраб")
 async def dev_panel_cmd(msg: Message):
-    if msg.chat.type != "private": return await msg.reply("Пароль вводи только в личке со мной!")
+    if msg.chat.type != "private": return await msg.reply("Пароль вводи только в личке!")
     awaiting_password.add(msg.from_user.id)
     await msg.reply("🔐 Введи пароль разработчика:")
 
@@ -76,21 +189,21 @@ async def check_dev_password(msg: Message):
     if msg.from_user.id not in awaiting_password: return
     awaiting_password.remove(msg.from_user.id)
     add_balance(msg.from_user.id, 999999)
-    premium_users.add(msg.from_user.id)
-    await msg.reply("👑 **Доступ разрешен!**\nТы получил 999999 🍫 и статус Premium.\n\n!выдать [id] [сумма] — выдать шоколадки\n!выдать_прем [id] — выдать премиум")
+    has_premium.add(msg.from_user.id)
+    await msg.reply("👑 **Доступ разрешен!** Ты получил 999999 🍫 и Premium.")
 
 @router.message(F.text.lower().startswith("!выдать_прем"))
 async def admin_give_prem_cmd(msg: Message):
-    if msg.from_user.id not in premium_users: return
+    if msg.from_user.id not in has_premium: return
     try:
         target_id = int(msg.text.split()[1])
-        premium_users.add(target_id)
+        has_premium.add(target_id)
         await msg.reply(f"✅ Пользователь {target_id} получил Premium!")
     except: await msg.reply("Формат: !выдать_прем 123456789")
 
 @router.message(F.text.lower().startswith("!выдать"))
 async def admin_give_cmd(msg: Message):
-    if msg.from_user.id not in premium_users: return
+    if msg.from_user.id not in has_premium: return
     try:
         parts = msg.text.split()
         target_id = int(parts[1])
@@ -99,26 +212,12 @@ async def admin_give_cmd(msg: Message):
         await msg.reply(f"✅ Выдано {amount} 🍫 пользователю {target_id}")
     except: await msg.reply("Формат: !выдать 123456789 100")
 
-# --- СИСТЕМА НИКОВ ---
-@router.message(F.text.lower().startswith("+ник"))
-async def set_nick_cmd(msg: Message):
-    parts = msg.text.split(maxsplit=1)
-    if len(parts) < 2: return await msg.reply("Напиши: +ник НовоеИмя")
-    new_nick = parts[1].strip()
-    if len(new_nick) > 20: return await msg.reply("Ник слишком длинный.")
-    custom_nicks[msg.from_user.id] = new_nick
-    await msg.reply(f"✅ Твой ник изменен на: {new_nick}")
-
-# --- УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК КОМАНД ---
+# --- УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ОСТАЛЬНЫХ КОМАНД ---
 @router.message(F.text)
 async def universal_handler(msg: Message):
     t = msg.text.lower()
     
-    # Профиль и Баланс
-    if t in ["!профиль", "/profile", "/профиль"]:
-        name = get_name(msg.from_user.id, msg.from_user.first_name)
-        await msg.reply(f"👤 **{name}**\n🍫 Баланс: {get_balance(msg.from_user.id)}\n⚠️ Варны: {warns.get(msg.from_user.id, 0)}/3")
-    elif t in ["!баланс", "/balance", "/баланс"]:
+    if t in ["!баланс", "/balance"]:
         await msg.reply(f"🍫 Твой баланс: {get_balance(msg.from_user.id)}")
     elif t == "!топ" or t == "/top":
         top = sorted(balances.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -126,36 +225,6 @@ async def universal_handler(msg: Message):
         for i, (uid, bal) in enumerate(top, 1):
             text += f"{i}. {get_name(uid, 'Неизвестный')} — {bal} 🍫\n"
         await msg.reply(text if text != "🏆 **Топ богачей:**\n" else "Пусто.")
-    
-    # Игры
-    elif is_cmd(t, "кто") or is_cmd(t, "who"):
-        try:
-            members = await msg.bot.get_chat_administrators(msg.chat.id)
-            random_member = random.choice(members).user
-            action = msg.text[4:].strip()
-            await msg.reply(f"🎲 {random_member.mention} — {action}!" if action else f"🎲 Случайный: {random_member.mention}")
-        except: await msg.reply("Не удалось.")
-    elif is_cmd(t, "дуэль") or is_cmd(t, "duel"):
-        if not msg.reply_to_message: return await msg.reply("Ответь на сообщение: !дуэль 50")
-        try: bet = int(msg.text.split()[1])
-        except: return await msg.reply("Укажи ставку: !дуэль 50")
-        if get_balance(msg.from_user.id) < bet or get_balance(msg.reply_to_message.from_user.id) < bet: return await msg.reply("У кого-то не хватает шоколадок.")
-        r1, r2 = random.randint(1, 100), random.randint(1, 100)
-        if r1 > r2:
-            add_balance(msg.from_user.id, bet); add_balance(msg.reply_to_message.from_user.id, -bet)
-            await msg.reply(f"⚔️ Ты победил! ({r1} vs {r2}) Забрал {bet} 🍫")
-        elif r2 > r1:
-            add_balance(msg.from_user.id, -bet); add_balance(msg.reply_to_message.from_user.id, bet)
-            await msg.reply(f"⚔️ Ты проиграл! ({r1} vs {r2}) Потерял {bet} 🍫")
-        else: await msg.reply("🤝 Ничья!")
-    elif t == "!кость" or t == "/dice":
-        await msg.reply(f"🎲 Выпало: {random.randint(1, 6)}")
-    elif t == "!монетка" or t == "/coin":
-        await msg.reply(f"🪙 {random.choice(['Орел', 'Решка'])}!")
-    elif is_cmd(t, "шар") or is_cmd(t, "ball"):
-        await msg.reply(f"🎱 {random.choice(['Да', 'Нет', 'Возможно', 'Спроси позже'])}")
-    
-    # Экономика
     elif t == "!работа" or t == "/work":
         if time.time() - last_work.get(msg.from_user.id, 0) < 3600: return await msg.reply("⏳ Отдохни.")
         earned = random.randint(10, 50)
@@ -168,48 +237,12 @@ async def universal_handler(msg: Message):
         add_balance(msg.from_user.id, bonus)
         last_daily[msg.from_user.id] = time.time()
         await msg.reply(f"🎁 +{bonus} 🍫!")
-    elif is_cmd(t, "перевод") or is_cmd(t, "transfer"):
-        if not msg.reply_to_message: return await msg.reply("Ответь на сообщение: !перевод 10")
-        try: amount = int(msg.text.split()[1])
-        except: return await msg.reply("!перевод 10")
-        if get_balance(msg.from_user.id) < amount: return await msg.reply("Мало.")
-        add_balance(msg.from_user.id, -amount); add_balance(msg.reply_to_message.from_user.id, amount)
-        await msg.reply("✅ Переведено.")
-    elif is_cmd(t, "казино") or is_cmd(t, "casino"):
-        try: bet = int(msg.text.split()[1])
-        except: return await msg.reply("Пример: !казино 10")
-        if get_balance(msg.from_user.id) < bet: return await msg.reply("Мало шоколадок.")
-        if random.choice([True, False]): add_balance(msg.from_user.id, bet); await msg.reply(f"🎰 Выиграл {bet} 🍫!")
-        else: add_balance(msg.from_user.id, -bet); await msg.reply(f"💸 Проиграл {bet} 🍫.")
-    
-    # Магазин
-    elif t == "!магазин" or t == "/shop":
-        text = "🛒 **Магазин:**\n"
-        for k, v in SHOP_ITEMS.items(): text += f"{v['name']} — {v['price']} 🍫 (!купить {k})\n"
-        await msg.reply(text)
-    elif is_cmd(t, "купить") or is_cmd(t, "buy"):
-        try: key = msg.text.split()[1].lower()
-        except: return await msg.reply("!магазин")
-        if key not in SHOP_ITEMS: return await msg.reply("Нет такого.")
-        if get_balance(msg.from_user.id) < SHOP_ITEMS[key]["price"]: return await msg.reply("Мало шоколадок.")
-        add_balance(msg.from_user.id, -SHOP_ITEMS[key]["price"])
-        inventory.setdefault(msg.from_user.id, []).append(key)
-        await msg.reply(f"✅ Куплено: {SHOP_ITEMS[key]['name']}")
-    
-    # Модерация
     elif is_cmd(t, "бан") or is_cmd(t, "ban"):
         if not await is_admin(msg) or not msg.reply_to_message: return
         try:
             await msg.bot.ban_chat_member(msg.chat.id, msg.reply_to_message.from_user.id)
             await msg.reply("🚫 Забанен.")
-        except: await msg.reply("Ошибка прав.")
-    elif is_cmd(t, "кик") or is_cmd(t, "kick"):
-        if not await is_admin(msg) or not msg.reply_to_message: return
-        try:
-            await msg.bot.ban_chat_member(msg.chat.id, msg.reply_to_message.from_user.id)
-            await msg.bot.unban_chat_member(msg.chat.id, msg.reply_to_message.from_user.id)
-            await msg.reply("👢 Кикнут.")
-        except: await msg.reply("Ошибка.")
+        except: pass
     elif is_cmd(t, "мут") or is_cmd(t, "mute"):
         if not await is_admin(msg) or not msg.reply_to_message: return
         try: mins = int(msg.text.split()[1])
@@ -218,18 +251,6 @@ async def universal_handler(msg: Message):
             await msg.bot.restrict_chat_member(msg.chat.id, msg.reply_to_message.from_user.id, permissions={"can_send_messages": False}, until_date=datetime.now() + timedelta(minutes=mins))
             await msg.reply(f"🤐 Замучен на {mins} мин.")
         except: pass
-    elif is_cmd(t, "варн") or is_cmd(t, "warn"):
-        if not await is_admin(msg) or not msg.reply_to_message: return
-        uid = msg.reply_to_message.from_user.id
-        warns[uid] = warns.get(uid, 0) + 1
-        await msg.reply(f"⚠️ Варн {warns[uid]}/3")
-        if warns[uid] >= 3:
-            try: await msg.bot.ban_chat_member(msg.chat.id, uid)
-            except: pass
-    elif t == "!амнистия" or t == "/amnesty":
-        if not await is_admin(msg): return
-        warns.clear()
-        await msg.reply("✅ Варны сброшены.")
 
 # --- ВЕБ-СЕРВЕР ---
 async def handle_ping(request): return web.Response(text="OK")
