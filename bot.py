@@ -53,15 +53,13 @@ async def welcome_new_member(msg: Message):
         await msg.reply(f"👋 Привет, {member.first_name}!\nНе забудь заработать свои первые 🍫 командой `!работа`.")
 
 # --- СТАРТ ---
-@router.message(F.text == "/start")
+@router.message(F.text.in_({"/start", "!start", "!помощь", "!help"}))
 async def start_cmd(msg: Message):
-    await msg.reply(
-        "🎮 **Игры:** !кто, !дуэль, !рулетка, !шар, !кость, !монетка\n"
-        "🍫 **Эко:** !профиль, !топ, !работа, !дейли, !магазин, !инвентарь, !перевод\n"
-        "🛡 **Модерация:** !бан, !кик, !мут, !разбан, !амнистия, !варн\n"
-        "👤 **Профиль:** +ник [новое_имя] — сменить ник\n"
-        "И многое другое!"
+    text = (
+        f"Привет {msg.from_user.first_name} 🍫\n"
+        "Я твой помощник, но команды узнай в меню лень болтать 🙊"
     )
+    await msg.reply(text)
 
 # --- СИСТЕМА НИКОВ ---
 @router.message(F.text.startswith("+ник"))
